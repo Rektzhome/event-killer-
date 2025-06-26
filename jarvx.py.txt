@@ -1,0 +1,137 @@
+# ==============================================================================
+# BOT NOTIFIKASI REAL-TIME (Untuk Heroku/Render)
+# ==============================================================================
+import os
+import time
+import random
+import requests
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+
+# --- KONFIGURASI PENGGUNA ---
+# Ambil dari environment variables di Heroku/Render untuk keamanan
+BOT_TOKEN = os.environ.get('BOT_TOKEN', "YOUR_BOT_TOKEN_HERE")
+CHAT_ID = os.environ.get('CHAT_ID', "YOUR_CHAT_ID_HERE")
+
+# --- KONFIGURASI BOT ---
+REWARD_URL = "https://loyalty.aldmic.com/reward?cat=11"
+POLL_INTERVAL_S = 20  # Cek setiap 20-30 detik agar tidak membebani server
+RANDOM_VARIATION_S = 10
+
+# Daftar ID dan nama reward yang diincar
+TARGET_REWARDS = {
+    '18823': 'Pulsa 50K',
+    '19021': 'Grab Transport 50K',
+    '18822': 'Pulsa 25K',
+    '19020': 'Grab Transport 20K',
+    '19019': 'Grab Food 10K',
+    '18826': 'Spotify 3 Bulan',
+}
+
+# State untuk melacak voucher yang sudah dinotifikasi agar tidak spam
+notified_vouchers = set()
+
+# --- FUNGSI-FUNGSI ---
+
+def send_telegram_message(text, link):
+    """Mengirim notifikasi ke Telegram dengan tombol link."""
+    message = f"🔥🔥🔥 **VOUCHER READY!** 🔥🔥🔥\n\n**{text}**\n\nCepat klaim sebelum kehabisan!"
+    
+    # Buat tombol inline dengan link
+    keyboard = {
+        "inline_keyboard": [[
+            {"text": "Buka Link & Klaim Sekarang!", "url": link}
+        ]]
+    }
+    
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {
+        'chat_id': CHAT_ID,
+        'text': message,
+        'parse_mode': 'Markdown',
+        'reply_markup': keyboard
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        response.raise_for_status()
+        print(f"✅ Notifikasi berhasil dikirim untuk: {text}")
+    except requests.exceptions.RequestException as e:
+        print(f"🔴 Gagal mengirim notifikasi Telegram: {e}")
+
+def setup_browser():
+    """Mengkonfigurasi dan menginisialisasi browser Selenium di server."""
+    chrome_options = Options()
+    # Argumen wajib untuk berjalan di lingkungan server seperti Heroku/Render
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    
+    # Path binary Chrome dan driver yang biasanya disediakan oleh buildpack
+    chrome_options.binary_location = os.environ.get("GOOGLE_CHROME_BIN")
+    
+    # Gunakan webdriver-manager untuk menangani driver secara otomatis
+    from webdriver_manager.chrome import ChromeDriverManager
+    from selenium.webdriver.chrome.service import Service
+    
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+    
+    print("✅ Browser Chrome berhasil diinisialisasi di server.")
+    return driver
+
+def main_loop():
+    """Loop utama untuk memantau dan mengirim notifikasi."""
+    os.system('pip install selenium webdriver-manager requests')
+    
+    send_telegram_message("Watcher diaktifkan di Cloud! ☁️⚡️\nMemulai pemantauan...", "https://loyalty.aldmic.com/reward")
+    driver = setup_browser()
+    
+    while True:
+        try:
+            print(f"[{time.strftime('%H:%M:%S')}] Memuat halaman reward...")
+            driver.get(REWARD_URL)
+            time.sleep(3)  # Tunggu konten dinamis termuat
+
+            voucher_cards = driver.find_elements(By.CSS_SELECTOR, 'a[href*="/reward/"]')
+            print(f" -> Ditemukan {len(voucher_cards)} kartu voucher.")
+            
+            found_ready = False
+            for card in voucher_cards:
+                try:
+                    href = card.get_attribute('href')
+                    if not href: continue
+
+                    voucher_id = href.split('/reward/')[-1].split('?')[0]
+
+                    if voucher_id in TARGET_REWARDS and voucher_id not in notified_vouchers:
+                        btn = card.find_element(By.CSS_SELECTOR, 'button, .btn')
+                        if 'redeem now' in btn.text.strip().lower():
+                            label = TARGET_REWARDS[voucher_id]
+                            print(f"🔥🔥🔥 DITEMUKAN: {label} READY!")
+                            
+                            send_telegram_message(label, href)
+                            notified_vouchers.add(voucher_id)
+                            found_ready = True
+                except Exception:
+                    continue # Lewati kartu jika ada error saat memprosesnya
+            
+            if not found_ready:
+                print(" -> Tidak ada target baru yang ready.")
+                # Reset daftar notifikasi jika semua target sudah tidak ready lagi
+                # Ini agar jika stok habis lalu muncul lagi, kita dapat notif lagi
+                notified_vouchers.clear()
+
+        except Exception as e:
+            print(f"🔴 Terjadi error di loop utama: {e}")
+            print("Mencoba me-restart browser...")
+            driver.quit()
+            driver = setup_browser()
+
+        delay = POLL_INTERVAL_S + random.uniform(0, RANDOM_VARIATION_S)
+        print(f"Siklus selesai. Cek lagi dalam {delay:.1f} detik.")
+        time.sleep(delay)
+
+if __name__ == "__main__":
+    main_loop()
